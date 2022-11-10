@@ -5,6 +5,33 @@
 #include "gfx_mono_text.h"
 #include "sysfont.h"
 
+/************************/
+/* BOARD CONFIG                                                         */
+/************************/
+
+#define USART_COM_ID ID_USART1
+#define USART_COM USART1
+
+// DEFINE AFEC
+#define AFEC_POT AFEC0
+#define AFEC_POT_ID ID_AFEC0
+#define AFEC_POT_CHANNEL 0 // Canal do pino PD30
+
+// DEFINE PWM0 VERMELHO
+#define PIO_PWM_0 PIOD
+#define ID_PIO_PWM_0 ID_PIOD
+#define MASK_PIN_PWM_0 (1 << 11)
+
+// DEFINE PWM0 AZUL
+#define PIO_PWM_0 PIOA
+#define ID_PIO_PWM_0 ID_PIOA
+#define MASK_PIN_PWM_0 (1 << 2)
+
+// DEFINE PWM0 VERDE
+#define PIO_PWM_0 PIOC
+#define ID_PIO_PWM_0 ID_PIOC
+#define MASK_PIN_PWM_0 (1 << 19)
+
 /** RTOS  */
 #define TASK_OLED_STACK_SIZE                (1024*6/sizeof(portSTACK_TYPE))
 #define TASK_OLED_STACK_PRIORITY            (tskIDLE_PRIORITY)
@@ -15,12 +42,26 @@ extern void vApplicationTickHook(void);
 extern void vApplicationMallocFailedHook(void);
 extern void xPortSysTickHandler(void);
 
+typedef struct {
+	uint32_t value;
+} adcData;
+
+typedef struct {
+	int R;
+	int G;
+	int B;
+} RGB;
+
 /** prototypes */
 static void RTT_init(float freqPrescale, uint32_t IrqNPulses, uint32_t rttIRQSource);
 void PWM_init(Pwm *p_pwm, uint id_pwm, pwm_channel_t *p_channel, uint channel, uint duty);
 static void config_AFEC_pot(Afec *afec, uint32_t afec_id, uint32_t afec_channel, afec_callback_t callback) ;
 void wheel( uint WheelPos, uint *r, uint *g, uint *b );
+void io_init(void);
 
+SemaphoreHandle_t xSemaphoreRTT;
+QueueHandle_t xQueueAFEC;
+QueueHandle_t xQueueRGB;
 /************************************************************************/
 /* RTOS application funcs                                               */
 /************************************************************************/
@@ -41,20 +82,95 @@ extern void vApplicationMallocFailedHook(void) {
 /* handlers / callbacks                                                 */
 /************************************************************************/
 
+static void AFEC_pot_callback(void) {
+	adcData adc;
+	adc.value = afec_channel_get_value(AFEC_POT, AFEC_POT_CHANNEL);
+	BaseType_t xHigherPriorityTaskWoken = pdTRUE;
+	xQueueSendFromISR(xQueueAFEC, &adc, &xHigherPriorityTaskWoken);
+}
+
+void RTT_Handler(void) {
+	uint32_t ul_status;
+	ul_status = rtt_get_status(RTT);
+
+	/* IRQ due to Alarm */
+	if ((ul_status & RTT_SR_ALMS) == RTT_SR_ALMS) {
+		BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+		xSemaphoreGiveFromISR(xQueueAFEC,xHigherPriorityTaskWoken);
+	}
+}
 /************************************************************************/
 /* TASKS                                                                */
 /************************************************************************/
 
 static void task_led(void *pvParameters) {
+	io_init();
 
+	/* inicializa PWM com duty cycle 23*/
+	/* MUITO IMPORTANTE CRIAR UM pwm_channel_t POR CANAL */
+	static pwm_channel_t pwm_channel_pin;
+	PWM_init(PWM0, ID_PWM0,  &pwm_channel_pin, PWM_CHANNEL_0, 23);
+
+	/* duty cycle */
+	int duty = 0;
+
+	/* Infinite loop */
 	while (1) {
+		/* fade in */
+		for(duty = 0; duty <= 255; duty++){
+			pwm_channel_update_duty(PWM0, &pwm_channel_pin, 255-duty);
+			delay_ms(10);
+		}
+		/* fade out*/
+		for(duty = 0; duty <= 255; duty++){
+			pwm_channel_update_duty(PWM0, &pwm_channel_pin, duty);
+			delay_ms(10);
+		}
+	}
+	
+}
 
+static void task_afec(void *pvParameters) {
+	io_init();
+	
+	char[5] cor;
+	for (;;)  {
+		if (xQueueReceive(xQueueAFEC, &cor, 0)) {
+			int cor_convertida = wheel(cor);
+			BaseType_t xHigherPriorityTaskWoken = pdTRUE;
+			xQueueSendFromISR(xQueueRGB, &cor, &xHigherPriorityTaskWoken);
+		}
 	}
 }
 
 /************************************************************************/
 /* funcoes                                                              */
 /************************************************************************/
+
+void io_init(void) {
+	/* Configura pino para ser controlado pelo PWM */
+	pmc_enable_periph_clk(ID_PIO_PWM_0);
+	pio_set_peripheral(PIO_PWM_0, PIO_PERIPH_B, MASK_PIN_PWM_0 );
+	
+	/* Configura pino para ser controlado pelo PWM */
+	pmc_enable_periph_clk(ID_PIO_PWM_0);
+	pio_set_peripheral(PIO_PWM_0, PIO_PERIPH_A, MASK_PIN_PWM_0 );
+	
+	/* Configura pino para ser controlado pelo PWM */
+	pmc_enable_periph_clk(ID_PIO_PWM_0);
+	pio_set_peripheral(PIO_PWM_0, PIO_PERIPH_B, MASK_PIN_PWM_0 );
+	//pio_configure(PIN_1_PIO, PIO_OUTPUT_0, PIN_1_IDX_MASK, PIO_DEFAULT);
+	
+	//pio_handler_set(BUT_1_PIO, BUT_1_PIO_ID, BUT_1_IDX_MASK, PIO_IT_FALL_EDGE,
+	//but1_callback);
+
+	//pio_enable_interrupt(BUT_1_PIO, BUT_1_IDX_MASK);
+
+	//pio_get_interrupt_status(BUT_1_PIO);
+
+	//NVIC_EnableIRQ(BUT_1_PIO_ID);
+	//NVIC_SetPriority(BUT_1_PIO_ID, 4);
+}
 
 void wheel( uint WheelPos, uint *r, uint *g, uint *b ) {
 
@@ -104,7 +220,6 @@ afec_callback_t callback) {
 	NVIC_SetPriority(afec_id, 4);
 	NVIC_EnableIRQ(afec_id);
 }
-
 
 static void configure_console(void) {
 	const usart_serial_options_t uart_serial_options = {
@@ -206,8 +321,10 @@ int main(void) {
 	/* Start the scheduler. */
 	vTaskStartScheduler();
 
-	/* RTOS não deve chegar aqui !! */
-	while(1){}
+	/* Infinite loop */
+	while (1) {
+		
+	}
 
 	/* Will only get here if there was insufficient memory to create the idle task. */
 	return 0;
